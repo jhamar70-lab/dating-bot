@@ -15,7 +15,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-BOT_TOKEN = "8795582059:AAHm7a0uKXK0mH7Iat19ARAlXJ8TvWI9gYU"  # Укажите ваш действующий токен
+BOT_TOKEN = "8795582059:AAHm7a0uKXK0mH7Iat19ARAlXJ8TvWI9gYU"  # Вставьте ваш действующий токен
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -46,7 +46,7 @@ def init_db():
 
 init_db()
 
-# --- FSM Состояния регистрации ---
+# --- FSM Состояния ---
 class Registration(StatesGroup):
     name = State()
     age = State()
@@ -54,7 +54,7 @@ class Registration(StatesGroup):
     bio = State()
     photo = State()
 
-# --- Вспомогательные клавиатуры ---
+# --- Клавиатуры ---
 def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -65,22 +65,20 @@ def main_menu_keyboard():
     )
 
 def action_keyboard(target_user_id):
-    builder = InlineKeyboardMarkup(inline_keyboard=[
+    return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="👍", callback_data=f"like_{target_user_id}"),
             InlineKeyboardButton(text="👎", callback_data=f"dislike_{target_user_id}")
         ]
     ])
-    return builder
 
-# --- Обработчик команды /start ---
+# --- Регистрация ---
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Привет! Добро пожаловать в бот знакомств! 👋\nНачнем с заполнения вашей анкеты.\n\nКак тебя зовут?", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Registration.name)
 
-# --- Мастер Регистрации ---
 @dp.message(Registration.name)
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
@@ -89,7 +87,7 @@ async def process_name(message: types.Message, state: FSMContext):
 
 @dp.message(Registration.age)
 async def process_age(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
+    if not message.text or not message.text.isdigit():
         await message.answer("Пожалуйста, введи возраст числом.")
         return
     
@@ -112,21 +110,24 @@ async def process_city(message: types.Message, state: FSMContext):
 @dp.message(Registration.bio)
 async def process_bio(message: types.Message, state: FSMContext):
     await state.update_data(bio=message.text)
-    await message.answer("Отправь свое фото:")
+    await message.answer("Отправь свое фото (именно картинку или фото):")
     await state.set_state(Registration.photo)
 
+# Прием фото или документа
 @dp.message(Registration.photo, F.photo | F.document)
 async def process_photo(message: types.Message, state: FSMContext):
+    photo_id = None
     if message.photo:
         photo_id = message.photo[-1].file_id
-    elif message.document and message.document.mime_type.startswith("image/"):
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith("image/"):
         photo_id = message.document.file_id
-    else:
-        await message.answer("Пожалуйста, отправь именно изображение!")
+
+    if not photo_id:
+        await message.answer("Не удалось распознать фото. Пожалуйста, отправь изображение.")
         return
 
     data = await state.get_data()
-
+    
     conn = sqlite3.connect("dating_bot.db")
     cursor = conn.cursor()
     cursor.execute("""
@@ -138,14 +139,17 @@ async def process_photo(message: types.Message, state: FSMContext):
 
     await state.clear()
     caption = f"Анкета сохранена! 🎉\n\n<b>{data['name']}</b>, {data['age']}, {data['city']}\n{data['bio']}"
-    await message.answer_photo(photo_id, caption=caption, parse_mode="HTML", reply_markup=main_menu_keyboard())
+    
+    if message.photo:
+        await message.answer_photo(photo_id, caption=caption, parse_mode="HTML", reply_markup=main_menu_keyboard())
+    else:
+        await message.answer_document(photo_id, caption=caption, parse_mode="HTML", reply_markup=main_menu_keyboard())
 
-# --- Перезаполнение анкеты ---
-@dp.message(F.text == "✏️ Заполнить анкету заново")
-async def restart_registration(message: types.Message, state: FSMContext):
-    await start_cmd(message, state)
+@dp.message(Registration.photo)
+async def process_photo_invalid(message: types.Message):
+    await message.answer("Жду фотографию! Пожалуйста, отправь картинку.")
 
-# --- Показ случайной анкеты ---
+# --- Просмотр анкет ---
 @dp.message(F.text == "🚀 Смотреть анкеты")
 async def show_next_profile(message: types.Message):
     conn = sqlite3.connect("dating_bot.db")
@@ -158,14 +162,21 @@ async def show_next_profile(message: types.Message):
     conn.close()
 
     if not target:
-        await message.answer("Пока нет доступных анкет. Приглашай друзей!")
+        await message.answer("Пока нет других доступных анкет в базе. Зарегистрируйте еще одного пользователя для проверки!")
         return
 
     u_id, name, age, city, bio, photo_id = target
     caption = f"<b>{name}</b>, {age}, {city}\n\n{bio}"
-    await message.answer_photo(photo_id, caption=caption, parse_mode="HTML", reply_markup=action_keyboard(u_id))
+    try:
+        await message.answer_photo(photo_id, caption=caption, parse_mode="HTML", reply_markup=action_keyboard(u_id))
+    except Exception:
+        await message.answer_document(photo_id, caption=caption, parse_mode="HTML", reply_markup=action_keyboard(u_id))
 
-# --- Обработка Лайка / Дизлайка ---
+@dp.message(F.text == "✏️ Заполнить анкету заново")
+async def restart_registration(message: types.Message, state: FSMContext):
+    await start_cmd(message, state)
+
+# --- Лайки / Дизлайки ---
 @dp.callback_query(F.data.startswith("like_"))
 async def handle_like(callback: types.CallbackQuery):
     target_id = int(callback.data.split("_")[1])
@@ -179,7 +190,8 @@ async def handle_like(callback: types.CallbackQuery):
 
     if sender:
         s_name, s_age, s_city, s_bio, s_photo = sender
-        caption = f"Ты кому-то понравился(лась)! ❤️\n\n<b>{s_name}</b>, {s_age}, {s_city}\n{s_bio}\n\nНаписано от: @{callback.from_user.username or 'без_юзернейма'}"
+        username_str = f"@{callback.from_user.username}" if callback.from_user.username else "без юзернейма"
+        caption = f"Ты кому-то понравился(лась)! ❤️\n\n<b>{s_name}</b>, {s_age}, {s_city}\n{s_bio}\n\nНаписать: {username_str}"
         try:
             await bot.send_photo(target_id, photo=s_photo, caption=caption, parse_mode="HTML")
         except Exception:
@@ -195,9 +207,9 @@ async def handle_dislike(callback: types.CallbackQuery):
     await callback.message.delete()
     await show_next_profile(callback.message)
 
-# --- Веб-сервер для проходимости Health Check на Render ---
+# --- Веб-сервер для Render ---
 async def handle_ping(request):
-    return web.Response(text="Dating Bot is Active!")
+    return web.Response(text="Dating Bot Active")
 
 async def start_web_server():
     app = web.Application()
@@ -210,7 +222,7 @@ async def start_web_server():
 
 async def main():
     await start_web_server()
-    print("Бот и веб-сервер запускаются...")
+    print("Бот запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
