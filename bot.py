@@ -115,11 +115,18 @@ async def process_bio(message: types.Message, state: FSMContext):
     await message.answer("Отправь свое фото:")
     await state.set_state(Registration.photo)
 
-@dp.message(Registration.photo, F.photo)
+@dp.message(Registration.photo, F.photo | F.document)
 async def process_photo(message: types.Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id
+    if message.photo:
+        photo_id = message.photo[-1].file_id
+    elif message.document and message.document.mime_type.startswith("image/"):
+        photo_id = message.document.file_id
+    else:
+        await message.answer("Пожалуйста, отправь именно изображение!")
+        return
+
     data = await state.get_data()
-    
+
     conn = sqlite3.connect("dating_bot.db")
     cursor = conn.cursor()
     cursor.execute("""
